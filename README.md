@@ -30,27 +30,27 @@ The system consists of **six sequential modules** (Figure 4 in the paper):
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  Audio ──► Speech-to-Text ──► Text                                │
-│            (OpenAI Whisper)                                         │
-│                                                                     │
+│  Audio ──► Speech-to-Text ──► Text                                 │
+│            (OpenAI Whisper)                                        │
+│                                                                    │
 │  Text ───► Input Generator                                         │
 │            (LLM Normalization: Ollama/llama3.2)                    │
-│                   │                                                 │
-│                   ▼                                                 │
-│            Motion Generator                                         │
-│            (MDM — Human Motion Diffusion Model)                     │
-│                   │ SMPL                                            │
-│                   ▼                                                 │
-│            Coordinates Converter                                    │
-│            (RX=+90°, RZ=+180°  MDM Y-up → HUGS Z-up)              │
-│                   │ SMPL                                            │
-│                   ▼                                                 │
+│                   │                                                │
+│                   ▼                                                │
+│            Motion Generator                                        │
+│            (MDM — Human Motion Diffusion Model)                    │
+│                   │ SMPL                                           │
+│                   ▼                                                │
+│            Coordinates Converter                                   │
+│            (RX=+90°, RZ=+180°  MDM Y-up → HUGS Z-up)               │
+│                   │ SMPL                                           │
+│                   ▼                                                │
 │  Avatar ──► 3DGS Generator                                         │
-│  Templates  (HUGS — Human Gaussian Splats)                          │
-│                   │ 3DGS                                            │
-│                   ▼                                                 │
-│            3DGS Renderer ──────────────────────────► 2D Video     │
-│            (Three.js / Web-based)                                   │
+│  Templates  (HUGS — Human Gaussian Splats)                         │
+│                   │ 3DGS                                           │
+│                   ▼                                                │
+│            3DGS Renderer ──────────────────────────► 2D Video      │
+│            (Three.js / Web-based)                                  │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -445,7 +445,7 @@ using `all-MiniLM-L6-v2` sentence embeddings:
 | can you do a dancing? | a person dancing | 0.688 |
 | uh, like someone kind of doing a happy dance | a person doing a happy dance | 0.704 |
 | like, you know, someone stretching their arms | a person stretching their arms | 0.792 |
-| **Overall Average** | | **0.698** |
+| **Overall Average** | | **0.736** |
 
 ### Coordinate Alignment (Table 4)
 
