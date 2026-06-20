@@ -32,3 +32,5 @@ screenshots/
 # Git submodules (cloned separately)
 submodules/
 higgs-audio/
+
+*.pdf

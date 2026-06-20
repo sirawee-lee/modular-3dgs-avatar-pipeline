@@ -536,7 +536,7 @@ Examples:
     if args.refine_prompt:
         args.prompt = refine_prompt(args.prompt, model=args.ollama_model)
 
-    def _speak(text: str, out_wav: str | None = None) -> None:
+    def _speak(text: str, out_wav: Optional[str] = None) -> None:
         """Speak text if --speech-output is enabled."""
         if args.speech_output:
             if not _SPEECH_AVAILABLE:

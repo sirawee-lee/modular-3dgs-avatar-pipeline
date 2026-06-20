@@ -19,6 +19,7 @@ Dependencies (install into the environment that runs run_text2hugs.py):
 
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 # Module-level cache so model weights are loaded only once per process.
 _higgs_engine = None
@@ -404,7 +405,7 @@ def refine_prompt(
 
 # ── TTS (HiggsAudio v2 with espeak fallback) ─────────────────────────────────
 
-def _speak_espeak(text: str, out_wav: str | None = None) -> bool:
+def _speak_espeak(text: str, out_wav: "Optional[str]" = None) -> bool:
     """Speak text with espeak (lightweight fallback). Returns True on success."""
     import shutil
     import subprocess
@@ -426,7 +427,7 @@ def speak_text(
     text: str,
     model_path: str = "bosonai/higgs-audio-v2-generation-3B-base",
     tokenizer_path: str = "bosonai/higgs-audio-v2-tokenizer",
-    out_wav: str | None = None,
+    out_wav: "Optional[str]" = None,
 ) -> None:
     """Synthesize speech and play/save it.
 

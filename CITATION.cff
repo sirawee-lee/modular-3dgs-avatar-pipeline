@@ -1,34 +1,62 @@
 cff-version: 1.2.0
 message: "If you use this code in your research, please cite our paper."
 
-title: "[PAPER TITLE — fill in before making repo public]"
-# Example: "Speech-Driven 3D Human Avatar Animation via Motion Diffusion and Gaussian Splatting"
+title: "Modular Neural Pipelines for Text-to-3DGS Avatar Generation: System Implementation and Preliminary Optimization"
 
 authors:
-  - family-names: "[LAST NAME]"
-    given-names: "[FIRST NAME]"
+  - family-names: "Leesaksakul"
+    given-names: "Napat"
     affiliation: "National Tsing Hua University"
-  # Add remaining authors here
+    email: "primlee04@gapp.nthu.edu.tw"
+  - family-names: "Wonganawat"
+    given-names: "Nahathai"
+    affiliation: "National Tsing Hua University"
+    email: "nahathai.wong@gapp.nthu.edu.tw"
+  - family-names: "Wutinarongtrakul"
+    given-names: "Sirawee"
+    affiliation: "National Tsing Hua University"
+    email: "pasika.swn@gapp.nthu.edu.tw"
+  - family-names: "Kaewchuay"
+    given-names: "Buachompoo"
+    affiliation: "National Tsing Hua University"
+    email: "buachompoo@gapp.nthu.edu.tw"
+  - family-names: "Hsu"
+    given-names: "Cheng-Hsin"
+    affiliation: "National Tsing Hua University"
+    email: "chsu@cs.nthu.edu.tw"
 
 year: 2026
-collection-title: "[Workshop/Conference Name — e.g. ImmerCom 2026]"
+collection-title: "Proceedings of the 1st International Workshop on Immersive Communication (ImmerCom '26)"
+conference:
+  name: "ImmerCom 2026"
+  date-start: "2026-10-30"
+  location: "Austin, Texas, USA"
 
-repository-code: "https://github.com/[ORG]/[REPO]"
-# Fill in the actual GitHub URL after making the repo public
-
-license: MIT   # pipeline code only — see THIRD_PARTY_LICENSES.md for dependencies
+license: MIT   # pipeline scripts only — see THIRD_PARTY_LICENSES.md for dependencies
 
 abstract: >
-  [ABSTRACT — paste the abstract from your paper here]
+  This paper presents an end-to-end modular neural pipeline that orchestrates
+  speech recognition, Large Language Model (LLM)-based prompt normalization,
+  diffusion-based motion generation, and 3D Gaussian Splatting (3DGS) avatar
+  rendering into a single, yet modularized workflow. To bridge the heterogeneous
+  coordinate systems between the motion generator and the avatar renderer, we
+  design a rotation connector to ensure proper upright and camera-facing
+  alignments. Furthermore, to mitigate the computational and storage bottlenecks
+  inherent to streaming heavy per-frame 3D Gaussians over resource-constrained
+  networks, we implement and evaluate a preliminary optimization approach using
+  keyframe subsampling. Our experimental results demonstrate that while the
+  pipeline successfully produces functional end-to-end animations, the required
+  rendering times and streaming bandwidth demand non-trivial resources.
 
 keywords:
   - 3d-gaussian-splatting
   - text-to-motion
-  - avatar
+  - avatar-generation
   - human-motion-diffusion
   - speech-to-animation
   - hugs
   - mdm
+  - immersive-communication
 
 references:
   - type: software
@@ -46,6 +74,7 @@ references:
         given-names: Anurag
     year: 2024
     url: "https://arxiv.org/abs/2311.17910"
+    notes: "CVPR 2024"
   - type: software
     title: "Human Motion Diffusion Model"
     authors:
@@ -61,5 +90,5 @@ references:
         given-names: Daniel
       - family-names: Bermano
         given-names: Amit Hacohen
-    year: 2023
+    year: 2022
     url: "https://arxiv.org/abs/2209.14916"
