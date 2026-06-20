@@ -1,0 +1,30 @@
+# Configuration for rendering MDM-generated motion with HUGS
+
+mode: 'human'
+eval: true
+dataset:
+  name: dummy
+
+# Motion inputs
+motion:
+  path: '/home/sigma/skibidi/motion-diffusion-model/save/humanml_enc_512_50steps/samples_humanml_enc_512_50steps_000750000_seed10_a_person_jumps/hugs_smpl_rotX90.npz'
+  fps: 20  # Adjust based on your MDM generation FPS
+
+# Model configuration
+human:
+  name: 'neuman'
+
+# Rendering
+render:
+  resolution: [1024, 1024]
+  output_format: 'mp4'
+
+# Training (if you want to fine-tune on a video)
+train:
+  iterations: 0 # Set > 0 if you have video input, 0 for motion-only
+  val_interval: -1
+  anim_interval: -1  
+
+# Output
+output_path: './output'
+exp_name: 'mdm_jumping'
