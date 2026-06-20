@@ -1,0 +1,34 @@
+# Python
+*.pyc
+__pycache__/
+
+# Editor
+.vscode
+
+# Pipeline outputs (can be very large — up to 12 GB per sequence)
+output/
+output_text2hugs*/
+*.mp4
+*.log
+
+# Per-frame Gaussian Splat exports (~101 MB per frame, DO NOT commit)
+*.ply
+*.gs
+
+# Model weights and checkpoints (DO NOT commit — download from source)
+*.pth
+*.pkl
+checkpoints/
+data/
+*.zip
+
+# Build artifacts
+build/
+diff_rasterization/diff_rast.egg-info
+diff_rasterization/dist
+tensorboard_3d/
+screenshots/
+
+# Git submodules (cloned separately)
+submodules/
+higgs-audio/

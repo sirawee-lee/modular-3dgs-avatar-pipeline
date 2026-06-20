@@ -1,0 +1,65 @@
+cff-version: 1.2.0
+message: "If you use this code in your research, please cite our paper."
+
+title: "[PAPER TITLE — fill in before making repo public]"
+# Example: "Speech-Driven 3D Human Avatar Animation via Motion Diffusion and Gaussian Splatting"
+
+authors:
+  - family-names: "[LAST NAME]"
+    given-names: "[FIRST NAME]"
+    affiliation: "National Tsing Hua University"
+  # Add remaining authors here
+
+year: 2026
+collection-title: "[Workshop/Conference Name — e.g. ImmerCom 2026]"
+
+repository-code: "https://github.com/[ORG]/[REPO]"
+# Fill in the actual GitHub URL after making the repo public
+
+license: MIT   # pipeline code only — see THIRD_PARTY_LICENSES.md for dependencies
+
+abstract: >
+  [ABSTRACT — paste the abstract from your paper here]
+
+keywords:
+  - 3d-gaussian-splatting
+  - text-to-motion
+  - avatar
+  - human-motion-diffusion
+  - speech-to-animation
+  - hugs
+  - mdm
+
+references:
+  - type: software
+    title: "HUGS: Human Gaussian Splats"
+    authors:
+      - family-names: Kocabas
+        given-names: Muhammed
+      - family-names: Chang
+        given-names: Jen-Hao Rick
+      - family-names: Gabriel
+        given-names: James
+      - family-names: Tuzel
+        given-names: Oncel
+      - family-names: Ranjan
+        given-names: Anurag
+    year: 2024
+    url: "https://arxiv.org/abs/2311.17910"
+  - type: software
+    title: "Human Motion Diffusion Model"
+    authors:
+      - family-names: Tevet
+        given-names: Guy
+      - family-names: Raab
+        given-names: Sigal
+      - family-names: Gordon
+        given-names: Brian
+      - family-names: Shafir
+        given-names: Yonatan
+      - family-names: Cohen-Or
+        given-names: Daniel
+      - family-names: Bermano
+        given-names: Amit Hacohen
+    year: 2023
+    url: "https://arxiv.org/abs/2209.14916"
