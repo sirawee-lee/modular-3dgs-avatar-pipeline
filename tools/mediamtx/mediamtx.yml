@@ -1,0 +1,22 @@
+# Minimal MediaMTX config for HUGS live-streaming (WebRTC egress).
+#
+# gst_stream_server.py --mode webrtc pushes an RTSP RECORD stream here
+# (rtspclientsink -> rtsp://127.0.0.1:8554/hugs_stream). MediaMTX re-exposes
+# that same stream as WebRTC (handles SDP/ICE/DTLS-SRTP itself) so a browser
+# can watch it with no custom signaling code on our side.
+#
+# Any key not set here falls back to MediaMTX's built-in defaults.
+#
+# Run:  tools/mediamtx/mediamtx tools/mediamtx/mediamtx.yml
+# Then open http://127.0.0.1:8889/hugs_stream in a browser (MediaMTX serves
+# a built-in WHEP viewer page there) once the stream is being published.
+
+rtspAddress: :8554
+
+webrtc: yes
+webrtcAddress: :8889           # HTTP: built-in viewer page + WHEP endpoint
+webrtcLocalUDPAddress: :8189   # actual media (ICE/DTLS-SRTP) over UDP
+
+paths:
+  hugs_stream:
+    source: publisher

@@ -33,4 +33,15 @@ screenshots/
 submodules/
 higgs-audio/
 
+# MediaMTX binary (downloaded separately, see tools/mediamtx/mediamtx.yml)
+tools/mediamtx/mediamtx
+tools/mediamtx/*.tar.gz
+
+# MediaMTX auto-generated TLS cert/key (regenerated locally on first run)
+auto.crt
+auto.key
+
+# Runtime logs from scripts/start_streaming.sh
+logs/
+
 *.pdf

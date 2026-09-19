@@ -312,6 +312,21 @@ python scripts/run_text2hugs.py \
   --dry_run
 ```
 
+### Live preview in a browser while it renders
+
+```bash
+./scripts/start_streaming.sh   # once, starts the background servers
+# open http://127.0.0.1:8889/hugs_stream and leave the tab open
+
+python scripts/run_text2hugs.py \
+  --prompt "a person jumps" \
+  --out_root ./output_text2hugs \
+  --stream-live
+```
+
+See [LIVE_STREAMING.md](LIVE_STREAMING.md) for how it works, the on-screen
+status text, and troubleshooting.
+
 ---
 
 ## Arguments Reference
@@ -342,6 +357,15 @@ python scripts/run_text2hugs.py \
 | `--mdm_py` | `~/anaconda3/envs/mdm/bin/python` | MDM environment Python executable |
 | `--hugs_repo` | *(this repo)* | Path to this repository |
 | `--hugs_py` | *(current Python)* | HUGS environment Python executable |
+
+### Live Streaming
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--stream-live` | `False` | Push each rendered frame to a live browser preview as it renders (see [LIVE_STREAMING.md](LIVE_STREAMING.md)) |
+| `--stream-host` | `127.0.0.1` | Host where `scripts/gst_stream_server.py` is listening |
+| `--stream-port` | `9977` | Port where `scripts/gst_stream_server.py` is listening |
+| `--stream-segment-duration` | `1.0` | Seconds per HLS segment (only used with `--mode hls`) |
 
 ### Speech I/O
 

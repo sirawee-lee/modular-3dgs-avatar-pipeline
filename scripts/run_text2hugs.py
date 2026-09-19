@@ -37,6 +37,9 @@ from typing import List, Optional
 
 # Speech I/O (optional — requires openai-whisper, sounddevice, scipy, higgs-audio)
 sys.path.insert(0, str(Path(__file__).parent))
+# Repo root, so `from hugs.utils.gst_stream import ...` resolves — `hugs` is a
+# namespace package (no __init__.py) only found via sys.path, not pip-installed.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     from speech_io import browser_record_and_transcribe, record_and_transcribe, refine_prompt, normalize_prompt, speak_text
     _SPEECH_AVAILABLE = True
@@ -387,6 +390,30 @@ Examples:
         help="Save per-frame Gaussian Splat .ply files during animation into anim_ply/ folder",
     )
     parser.add_argument(
+        "--stream-live",
+        action="store_true",
+        help="Push each rendered frame to a live GStreamer/HLS server as it's rendered, "
+             "instead of waiting for the whole clip before producing a video "
+             "(start scripts/gst_stream_server.py first, in the 'gstreamer' conda env)",
+    )
+    parser.add_argument(
+        "--stream-host",
+        default="127.0.0.1",
+        help="Host where scripts/gst_stream_server.py is listening (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--stream-port",
+        type=int,
+        default=9977,
+        help="Port where scripts/gst_stream_server.py is listening (default: 9977)",
+    )
+    parser.add_argument(
+        "--stream-segment-duration",
+        type=float,
+        default=1.0,
+        help="Seconds per HLS segment for --stream-live (default: 1.0)",
+    )
+    parser.add_argument(
         "--subsample-k",
         type=int,
         default=1,
@@ -597,7 +624,16 @@ Examples:
     start_time = datetime.now()
     executed_commands = []
     bench = StageBenchmark()
-    
+
+    if args.stream_live and not args.dry_run:
+        # Tell the stream server we're starting now, well before HUGS
+        # rendering (stage 4) actually connects with real frames — so
+        # viewers see a "please wait, rendering..." placeholder for the
+        # ~MDM + SMPL-extraction time too, instead of the previous run's
+        # stale replay loop or nothing.
+        from hugs.utils.gst_stream import notify_pending
+        notify_pending(host=args.stream_host, port=args.stream_port)
+
     # ====================
     # Stage 1: Run MDM
     # ====================
@@ -790,6 +826,10 @@ Examples:
         f"custom_motion_path={rotated_npz}",
         f"save_anim_ply={'true' if args.save_ply else 'false'}",
         f"anim_subsample_k={args.subsample_k}",
+        f"stream_live={'true' if args.stream_live else 'false'}",
+        f"stream_host={args.stream_host}",
+        f"stream_port={args.stream_port}",
+        f"stream_segment_duration={args.stream_segment_duration}",
     ]
 
     hugs_log = hugs_logs_dir / "hugs.log"

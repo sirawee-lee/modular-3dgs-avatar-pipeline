@@ -562,8 +562,12 @@ class GaussianTrainer():
             self.human_gs.eval()
         
         os.makedirs(f'{self.cfg.logdir}/anim/', exist_ok=True)
-        
+
         k = getattr(self.cfg, 'anim_subsample_k', 1)
+        anim_fps = 20  # must match the fps passed to create_video() below
+        streamer = None
+        total_stream_frames = len(range(0, len(self.anim_dataset), k))
+        pushed_frames = 0
         for idx, data in enumerate(tqdm(self.anim_dataset, desc="Animation")):
             if idx % k != 0:
                 continue
@@ -594,15 +598,36 @@ class GaussianTrainer():
             )
             
             image = render_pkg["render"]
-            
+
+            if getattr(self.cfg, 'stream_live', False) and streamer is None:
+                from hugs.utils.gst_stream import FrameStreamClient
+                stream_out_dir = f'{self.cfg.logdir}/stream'
+                streamer = FrameStreamClient(
+                    image,
+                    fps=anim_fps,
+                    out_dir=stream_out_dir,
+                    segment_duration=getattr(self.cfg, 'stream_segment_duration', 1.0),
+                    host=getattr(self.cfg, 'stream_host', '127.0.0.1'),
+                    port=getattr(self.cfg, 'stream_port', 9977),
+                    total_frames=total_stream_frames,
+                )
+                logger.info(f"Live streaming (HLS) to {stream_out_dir}")
+
+            if streamer is not None:
+                pushed_frames += 1
+                streamer.push_frame(image)
+
             torchvision.utils.save_image(image, f'{self.cfg.logdir}/anim/{idx:05d}.png')
 
-            if human_gs_out is not None:
+            if self.cfg.save_anim_ply and human_gs_out is not None:
                 os.makedirs(f'{self.cfg.logdir}/anim_ply/', exist_ok=True)
                 save_posed_ply(human_gs_out, f'{self.cfg.logdir}/anim_ply/{idx:05d}_splat.ply')
-            
+
+        if streamer is not None:
+            streamer.close()
+
         video_fname = f'{self.cfg.logdir}/anim_{self.cfg.dataset.name}_{self.cfg.dataset.seq}_{iter_s}.mp4'
-        create_video(f'{self.cfg.logdir}/anim/', video_fname, fps=20)
+        create_video(f'{self.cfg.logdir}/anim/', video_fname, fps=anim_fps)
         if not keep_images:
             shutil.rmtree(f'{self.cfg.logdir}/anim/')
             os.makedirs(f'{self.cfg.logdir}/anim/')

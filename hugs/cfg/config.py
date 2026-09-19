@@ -23,6 +23,12 @@ cfg.bg_color = 'white'
 cfg.save_anim_ply = True  # save per-frame posed .ply files during animation (deformed/animated position)
 cfg.anim_subsample_k = 1  # export every k-th frame (1=all, 2=half, 4=quarter)
 
+# live streaming (see hugs/utils/gst_stream.py + scripts/gst_stream_server.py)
+cfg.stream_live = False  # push each rendered anim frame to a live GStreamer/HLS server as it's rendered
+cfg.stream_host = '127.0.0.1'
+cfg.stream_port = 9977
+cfg.stream_segment_duration = 1.0  # seconds per HLS segment
+
 # human dataset configuration
 cfg.dataset = OmegaConf.create()
 cfg.dataset.name = 'neuman' # 'zju', 'colmap', 'people_snapshot', 'itw'
