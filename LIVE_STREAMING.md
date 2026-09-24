@@ -18,7 +18,7 @@ scripts/gst_stream_server.py --mode webrtc (gstreamer env)
 tools/mediamtx/mediamtx
       │  re-exposes the feed as WebRTC — no browser code, no signaling to write
       ▼
-your browser: http://127.0.0.1:8889/hugs_stream
+your browser: http://127.0.0.1:9080/hugs_stream
 ```
 
 Two separate conda envs are involved because GStreamer/PyGObject only lives
@@ -34,7 +34,7 @@ cd /home/sigma/modular-3dgs-avatar-pipeline
 ./scripts/start_streaming.sh
 
 # 2. Open in a browser, leave the tab open
-#    http://127.0.0.1:8889/hugs_stream
+#    http://127.0.0.1:9080/hugs_stream
 
 # 3. Run any pipeline with --stream-live added
 /home/sigma/anaconda3/envs/hugs/bin/python scripts/run_text2hugs.py \
@@ -116,7 +116,7 @@ number of viewers natively, nothing extra to configure.
 
 **Want other machines on the LAN to watch, not just this one**
 Replace `127.0.0.1` with this machine's LAN IP in the viewer URL
-(`http://<this-machine-IP>:8889/hugs_stream`). Note there's no
+(`http://<this-machine-IP>:9080/hugs_stream`). Note there's no
 authentication on that endpoint — anyone on the same network segment could
 also open it. Fine for a trusted home/office network; add MediaMTX's
 built-in auth (or a firewall rule / VPN) before doing this on a network you
@@ -145,6 +145,6 @@ don't fully trust.
 |---|---|---|
 | `hugs/utils/gst_stream.py` | `hugs` env | Stdlib-only TCP client — no GStreamer dependency. Sends raw frames + the `notify_pending()` fire-and-forget ping. |
 | `scripts/gst_stream_server.py` | `gstreamer` env | Owns the actual GStreamer pipeline: encoding, the status overlay, the persistent RTSP publish, the idle-loop and flash logic (`WebrtcFeeder`). |
-| `tools/mediamtx/mediamtx.yml` | — | MediaMTX config: RTSP-in on 8554, WebRTC-out on 8889. |
+| `tools/mediamtx/mediamtx.yml` | — | MediaMTX config: RTSP-in on 8554, WebRTC-out on 9080. |
 | `scripts/start_streaming.sh` | shell | Convenience launcher for both background servers. |
 | `hugs/trainer/gs_trainer.py` | `hugs` env | The HUGS animate loop — where each frame is rendered and immediately handed to `FrameStreamClient.push_frame()`. |

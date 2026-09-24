@@ -79,8 +79,13 @@ def main(cfg):
     # run animation
     if cfg.mode in ['human', 'human_scene']:
         trainer.animate()
-        trainer.render_canonical(pose_type='a_pose')
-        trainer.render_canonical(pose_type='da_pose')
+        # Canonical-pose preview renders (200 extra frames: 100 a_pose +
+        # 100 da_pose) are unused by scripts/run_text2hugs.py -- it only
+        # copies anim_*.mp4/anim_ply/ into final/, never canon/. Skippable
+        # via skip_canonical=true to avoid paying for unused rendering.
+        if not getattr(cfg, 'skip_canonical', False):
+            trainer.render_canonical(pose_type='a_pose')
+            trainer.render_canonical(pose_type='da_pose')
 
 
 if __name__=='__main__':

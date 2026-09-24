@@ -49,9 +49,25 @@ happens after encoding depends on --mode:
 
   In both modes, `queue` decouples the socket-reading loop from encode/mux
   so the render process's push_frame() calls never block on encoding.
+
+This server also acts as the "pipeline bus": a generic push/pull relay for
+non-video data hand-offs between pipeline stages (MDM motion -> SMPL params
+-> rotated motion -> HUGS), so those stages don't need files on disk to talk
+to each other, and don't need PyGObject in their own conda envs either --
+same reasoning as the video path above, just generalized. See PipelineBus /
+_BusChannel below and scripts/pipeline_bus.py for the (stdlib-only) client
+used by every stage. Each (run_id, stage) hand-off gets its own single-shot
+`appsrc ! queue ! appsink` micro-pipeline: real GStreamer buffering/
+backpressure via already-tested C code rather than a second, hand-rolled
+synchronization primitive living next to the video pipelines' GStreamer-based
+one, and it's the direct on-ramp if a future payload genuinely is a media
+stream rather than an opaque blob (same _BusChannel shape, different pipeline
+string). Bus support is mode-independent (works under --mode hls too) since
+it has nothing to do with how the final video gets encoded.
 """
 
 import argparse
+import collections
 import json
 import os
 import socket
@@ -64,6 +80,8 @@ import gi
 gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 from gi.repository import GLib, Gst, GstVideo  # noqa: E402
+
+from pipeline_bus import BUS_ERROR_MARKER, _recv_exact, _send_framed  # noqa: E402
 
 
 def _wrap_frame(payload: bytes, width: int, height: int) -> Gst.Buffer:
@@ -84,6 +102,134 @@ def _wrap_frame(payload: bytes, width: int, height: int) -> Gst.Buffer:
         width, height, 1, [0, 0, 0, 0], [width * 3, 0, 0, 0],
     )
     return buf
+
+
+# ---------------------------------------------------------------------------
+# Pipeline bus: generic push/pull relay for non-video stage-to-stage hand-offs
+# ---------------------------------------------------------------------------
+
+class _BusChannel:
+    """One-shot appsrc!queue!appsink micro-pipeline for a single (run_id,
+    stage) hand-off: one push, then EOS. After the first successful pull the
+    extracted bytes are cached at the Python level, so a retried/duplicate
+    pull (e.g. a client reconnect after a network blip) still returns the
+    same payload without re-touching the GStreamer pipeline."""
+
+    def __init__(self):
+        self.pipeline = Gst.parse_launch(
+            "appsrc name=src caps=application/octet-stream is-live=false "
+            "block=true format=time "
+            "! queue name=q max-size-buffers=1 leaky=no "
+            "! appsink name=sink emit-signals=false sync=false max-buffers=1 drop=false"
+        )
+        self.appsrc = self.pipeline.get_by_name("src")
+        self.appsink = self.pipeline.get_by_name("sink")
+        self._cached = None
+        self._lock = threading.Lock()
+        # Must be PLAYING before pull()'s try-pull-sample can block correctly
+        # -- pull() commonly runs BEFORE push() (a consumer racing ahead of
+        # its producer is the normal case, not an edge case), so this can't
+        # wait until push() to flip the pipeline state the way a "first
+        # touch wins" design might suggest.
+        self.pipeline.set_state(Gst.State.PLAYING)
+
+    def push(self, payload: bytes) -> None:
+        with self._lock:
+            if self._cached is not None:
+                return  # already has data cached -- ignore a duplicate push
+        self.appsrc.emit("push-buffer", Gst.Buffer.new_wrapped(payload))
+        self.appsrc.emit("end-of-stream")
+
+    def pull(self, timeout_s: float) -> bytes:
+        with self._lock:
+            if self._cached is not None:
+                return self._cached
+        sample = self.appsink.emit("try-pull-sample", int(timeout_s * Gst.SECOND))
+        if sample is None:
+            raise TimeoutError
+        buf = sample.get_buffer()
+        data = buf.extract_dup(0, buf.get_size())
+        with self._lock:
+            self._cached = data
+        return data
+
+
+class PipelineBus:
+    """(run_id, stage) -> _BusChannel, with simple LRU eviction so a long
+    unattended benchmark-sweep session doesn't leak channels/pipelines
+    across dozens of runs."""
+
+    def __init__(self, max_channels: int = 200):
+        self.max_channels = max_channels
+        self._channels = collections.OrderedDict()
+        self._lock = threading.Lock()
+
+    def _get_or_create(self, key):
+        with self._lock:
+            chan = self._channels.get(key)
+            if chan is None:
+                chan = _BusChannel()
+                self._channels[key] = chan
+                while len(self._channels) > self.max_channels:
+                    _, old_chan = self._channels.popitem(last=False)
+                    old_chan.pipeline.set_state(Gst.State.NULL)
+            else:
+                self._channels.move_to_end(key)
+            return chan
+
+    def push(self, run_id: str, stage: str, payload: bytes) -> None:
+        self._get_or_create((run_id, stage)).push(payload)
+
+    def pull(self, run_id: str, stage: str, timeout: float) -> bytes:
+        return self._get_or_create((run_id, stage)).pull(timeout)
+
+
+def _handle_bus_connection(conn: socket.socket, header: dict, bus: PipelineBus) -> None:
+    op = header.get("bus_op")
+    run_id = header.get("run_id")
+    stage = header.get("stage")
+
+    if op == "ping":
+        conn.sendall(b"\x01")
+        return
+
+    if op == "push":
+        payload = _recv_framed_payload(conn)
+        if payload is None:
+            print("[gst_stream_server] bus push: client disconnected mid-payload")
+            return
+        bus.push(run_id, stage, payload)
+        conn.sendall(b"\x01")
+        print(f"[gst_stream_server] bus push: run={run_id} stage={stage} bytes={len(payload)}")
+        return
+
+    if op == "pull":
+        timeout = float(header.get("timeout", 60.0))
+        try:
+            payload = bus.pull(run_id, stage, timeout)
+            _send_framed(conn, payload)
+            print(f"[gst_stream_server] bus pull: run={run_id} stage={stage} ok bytes={len(payload)}")
+        except TimeoutError:
+            conn.sendall(struct.pack(">I", BUS_ERROR_MARKER))
+            error_msg = json.dumps({"error": f"timeout waiting for run={run_id} stage={stage}"}).encode("utf-8")
+            _send_framed(conn, error_msg)
+            print(f"[gst_stream_server] bus pull: run={run_id} stage={stage} timeout")
+        return
+
+    print(f"[gst_stream_server] bus: unknown bus_op {op!r}")
+
+
+def _recv_framed_payload(conn: socket.socket):
+    """Reads one length-prefixed frame sent by pipeline_bus.push() (length
+    prefix + that many bytes). Returns None on disconnect before the length
+    prefix arrives."""
+    length_bytes = _recv_exact(conn, 4)
+    if length_bytes is None:
+        return None
+    (length,) = struct.unpack(">I", length_bytes)
+    if length == 0:
+        return b""
+    return _recv_exact(conn, length)
 
 
 # ---------------------------------------------------------------------------
@@ -455,16 +601,6 @@ def handle_webrtc_connection(conn: socket.socket, header: dict, feeder: WebrtcFe
         print(f"[gst_stream_server] session done: {frame_idx} frames -> now looping last clip until next session")
 
 
-def _recv_exact(conn: socket.socket, n: int):
-    buf = b""
-    while len(buf) < n:
-        chunk = conn.recv(n - len(buf))
-        if not chunk:
-            return None
-        buf += chunk
-    return buf
-
-
 def _read_header(conn: socket.socket):
     header_bytes = b""
     while not header_bytes.endswith(b"\n"):
@@ -490,39 +626,58 @@ def main():
         "--mediamtx-url", default="rtsp://127.0.0.1:8554/hugs_stream",
         help="RTSP RECORD URL to push to when --mode webrtc (must match a path in mediamtx.yml)",
     )
+    parser.add_argument(
+        "--bus-max-channels", type=int, default=200, dest="bus_max_channels",
+        help="Max number of (run_id, stage) pipeline-bus channels to keep alive at once, "
+             "LRU-evicted beyond this (default: 200)",
+    )
     args = parser.parse_args()
 
     Gst.init(None)
     feeder = WebrtcFeeder(args.mediamtx_url) if args.mode == "webrtc" else None
+    bus = PipelineBus(max_channels=args.bus_max_channels)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((args.host, args.port))
-    server.listen(1)
+    # Backlog > 1 and a thread per connection (see _handle_connection): the
+    # pipeline bus needs pull() to block waiting on a producer while that
+    # producer's OWN push() connection is accepted and serviced concurrently
+    # -- with a single-connection-at-a-time loop, an early pull() would starve
+    # accept() and the matching push() could never even land.
+    server.listen(8)
     print(f"[gst_stream_server] listening on {args.host}:{args.port} (mode={args.mode})")
 
     while True:
         conn, addr = server.accept()
-        print(f"[gst_stream_server] connection from {addr}")
-        try:
-            header = _read_header(conn)
-            if header is None:
-                print("[gst_stream_server] client disconnected before sending header")
-                continue
-            if header.get("pending"):
-                # Fire-and-forget: a new run is starting, no frames follow.
-                if feeder is not None:
-                    print("[gst_stream_server] new run announced, showing placeholder")
-                    feeder.set_pending()
-                continue
-            if args.mode == "webrtc":
-                handle_webrtc_connection(conn, header, feeder)
-            else:
-                handle_hls_connection(conn, header)
-        except Exception as e:
-            print(f"[gst_stream_server] error: {e}")
-        finally:
-            conn.close()
+        threading.Thread(
+            target=_handle_connection, args=(conn, addr, args, feeder, bus), daemon=True,
+        ).start()
+
+
+def _handle_connection(conn: socket.socket, addr, args, feeder, bus: PipelineBus) -> None:
+    print(f"[gst_stream_server] connection from {addr}")
+    try:
+        header = _read_header(conn)
+        if header is None:
+            print("[gst_stream_server] client disconnected before sending header")
+            return
+        if header.get("pending"):
+            # Fire-and-forget: a new run is starting, no frames follow.
+            if feeder is not None:
+                print("[gst_stream_server] new run announced, showing placeholder")
+                feeder.set_pending()
+            return
+        if "bus_op" in header:
+            _handle_bus_connection(conn, header, bus)
+        elif args.mode == "webrtc":
+            handle_webrtc_connection(conn, header, feeder)
+        else:
+            handle_hls_connection(conn, header)
+    except Exception as e:
+        print(f"[gst_stream_server] error: {e}")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

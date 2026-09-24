@@ -182,6 +182,17 @@ def rendering_caps(scene_name, nframes, scene):
     return dummy_caps
 
 
+def _custom_motion_arrays(custom_data):
+    """Shared by the disk (custom_motion_path) and pipeline-bus
+    (custom_motion_bus_stage) custom-motion loading branches below --
+    `custom_data` is anything indexable like an np.load() NpzFile
+    (global_orient/body_pose/transl/betas keys)."""
+    poses = np.concatenate([custom_data['global_orient'], custom_data['body_pose']], axis=1)
+    transl = custom_data['transl']
+    betas = custom_data['betas']
+    return poses, transl, betas
+
+
 class NeumanDataset(torch.utils.data.Dataset):
     def __init__(
         self, seq_or_cfg, split, 
@@ -211,11 +222,30 @@ class NeumanDataset(torch.utils.data.Dataset):
         
         if split == 'anim':
             if cfg and hasattr(cfg, 'custom_motion_path') and cfg.custom_motion_path:
-                # Load custom SMPL params
+                # Load custom SMPL params from disk (--save-intermediate mode,
+                # or a standalone custom_motion_path= override).
                 custom_data = np.load(cfg.custom_motion_path)
-                poses = np.concatenate([custom_data['global_orient'], custom_data['body_pose']], axis=1)
-                transl = custom_data['transl']
-                betas = custom_data['betas']
+                poses, transl, betas = _custom_motion_arrays(custom_data)
+                nframes = poses.shape[0]
+            elif cfg and getattr(cfg, 'custom_motion_bus_stage', ''):
+                # Default mode: pull the rotated motion npz from the pipeline
+                # bus (scripts/gst_stream_server.py) instead of a file on disk
+                # -- see scripts/pipeline_bus.py and run_text2hugs.py.
+                import io
+                import sys
+                from pathlib import Path as _Path
+                scripts_dir = str(_Path(__file__).resolve().parents[2] / 'scripts')
+                if scripts_dir not in sys.path:
+                    sys.path.insert(0, scripts_dir)
+                from pipeline_bus import pull as _bus_pull
+
+                payload = _bus_pull(
+                    cfg.custom_motion_bus_run_id, cfg.custom_motion_bus_stage,
+                    timeout=getattr(cfg, 'bus_pull_timeout', 120.0),
+                    host=cfg.stream_host, port=cfg.stream_port,
+                )
+                custom_data = np.load(io.BytesIO(payload))
+                poses, transl, betas = _custom_motion_arrays(custom_data)
                 nframes = poses.shape[0]
             else:
                 motion_path, start_idx, end_idx, skip = mocap_path(seq)

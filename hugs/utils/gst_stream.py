@@ -31,9 +31,18 @@ render loop and the encode/stream pipeline run concurrently for free.
 
 import json
 import socket
-import struct
+import sys
+from pathlib import Path
 
 import torch
+
+# scripts/pipeline_bus.py holds the shared (stdlib-only) low-level framing
+# primitives used by both this client and scripts/gst_stream_server.py, so
+# there's one wire format implementation, not two.
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from pipeline_bus import _send_framed  # noqa: E402
 
 
 class FrameStreamClient:
@@ -81,9 +90,7 @@ class FrameStreamClient:
         self._send(frame.tobytes())
 
     def _send(self, payload: bytes) -> None:
-        self._sock.sendall(struct.pack(">I", len(payload)))
-        if payload:
-            self._sock.sendall(payload)
+        _send_framed(self._sock, payload)
 
     def close(self) -> None:
         try:

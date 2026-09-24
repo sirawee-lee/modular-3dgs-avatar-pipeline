@@ -1,12 +1,17 @@
 #!/bin/bash
-# Starts the two background processes the live-stream viewer needs:
+# Starts the two background processes the pipeline needs:
 #   1. MediaMTX      - re-exposes our GStreamer feed as WebRTC to the browser
-#   2. gst_stream_server.py (--mode webrtc) - encodes HUGS frames and pushes
-#      them to MediaMTX, looping the last clip between renders
+#      (only used for --stream-live viewing)
+#   2. gst_stream_server.py (--mode webrtc) - the "broker": encodes/pushes
+#      HUGS frames to MediaMTX for --stream-live, AND (as of the pipeline-bus
+#      work) relays every stage's data hand-off (MDM motion -> SMPL params ->
+#      rotated motion -> HUGS) by default -- see scripts/pipeline_bus.py.
+#      run_text2hugs.py fails fast at startup if this isn't reachable, unless
+#      run with --save-intermediate (which still uses files, not the bus).
 #
 # Safe to run more than once: if a process is already running, it's left
-# alone rather than started again. Run this once before using
-# scripts/run_text2hugs.py --stream-live.
+# alone rather than started again. Run this once before any
+# scripts/run_text2hugs.py run (not just --stream-live ones).
 
 set -e
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,9 +40,13 @@ else
 fi
 
 echo ""
-echo "Ready. Open this in a browser and leave the tab open:"
-echo "  http://127.0.0.1:8889/hugs_stream"
+echo "Ready. The pipeline bus is now up -- run_text2hugs.py will use it by"
+echo "default for every run (add --save-intermediate to also write the"
+echo "conventional rotated_npz/etc. files to disk)."
 echo ""
-echo "Then run a pipeline with --stream-live, e.g.:"
+echo "For live viewing, open this in a browser and leave the tab open:"
+echo "  http://127.0.0.1:9080/hugs_stream"
+echo ""
+echo "Example run:"
 echo "  /home/sigma/anaconda3/envs/hugs/bin/python scripts/run_text2hugs.py \\"
 echo "    --prompt \"a person waving\" --out_root ./output_text2hugs --stream-live"

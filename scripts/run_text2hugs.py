@@ -1,13 +1,33 @@
 #!/usr/bin/env python3
 """
-End-to-end pipeline: TEXT PROMPT → MDM → HUGS SMPL → Rotate → HUGS Render → Video
+End-to-end pipeline: Speech/Text → LLM → MDM → Coordinate Convert → HUGS 3DGS Render
 
-Workflow:
-  1. Run MDM sampling from text prompt
-  2. Find/convert MDM output to HUGS SMPL npz format
-  3. Rotate SMPL motion to HUGS coordinate system (RX=+90°, RZ=+180°)
-  4. Run HUGS rendering with custom motion
-  5. Extract final video and save to output directory
+Workflow (5 stages -- see StageBenchmark / benchmark_timing.json for per-stage
+timing, resource usage, and read/compute/write phase breakdowns):
+  1. Speech-to-text: Whisper transcribes an audio file / mic / browser
+     recording to text. Skipped (not run) for plain --prompt text input.
+  2. LLM input generator: llama3.2 (via Ollama, see speech_io.py) normalizes
+     whatever text stage 1 (or --prompt) produced into "a person <motion>",
+     with optional --refine-prompt extra cleanup on top.
+  3. Motion generator: MDM turns the text prompt into a 3D joint trajectory
+     (skeleton), Y-up.
+  4. Coordinate converter: two sub-steps that get MDM's output into the
+     format/frame HUGS needs -- (a) SMPLify-3D fits SMPL pose parameters
+     (global_orient/body_pose/betas) to the joint trajectory, then (b) the
+     fitted root is rotated+translated (RX=+90°, RZ=+180°) into HUGS's Z-up
+     coordinate system.
+  5. 3DGS generator: HUGS renders the motion into per-frame Gaussian Splats,
+     producing PNG frames + the final MP4 (PLY export is opt-in via
+     --save_ply, off by default). When --stream-live is set, frames stream
+     live via GStreamer as they render (hugs/utils/gst_stream.py) -- there's
+     no separate playback/render-serving stage, since streaming already
+     happens inline here rather than as a later step over the finished file.
+
+By default, stages 3-5 hand data to each other through a GStreamer-based
+pipeline bus (scripts/pipeline_bus.py + scripts/gst_stream_server.py)
+instead of files on disk -- start it first with ./scripts/start_streaming.sh.
+Pass --save-intermediate to also archive the intermediate npz files to their
+conventional on-disk paths (needed e.g. for run_k_benchmark.py-style reuse).
 
 Usage:
   python scripts/run_text2hugs.py \
@@ -46,6 +66,16 @@ try:
 except ImportError:
     _SPEECH_AVAILABLE = False
 
+# Pipeline bus (stage-to-stage data transport, default instead of disk files)
+# and per-stage resource/phase profiling -- both in this same scripts/ dir.
+import pipeline_bus
+from pipeline_profiling import PhaseTimer, ResourceSampler, merge_phase_dicts, merge_resource_summaries
+
+# Stage keys the bus uses to key each hand-off -- see scripts/pipeline_bus.py.
+BUS_STAGE_MDM_RESULTS = "mdm_results"        # stage 3 (motion generator) -> stage 4 (coordinate converter)
+BUS_STAGE_SMPL_EXTRACT = "smpl_extract"      # stage 4 internal hop: SMPL fit -> rotate
+BUS_STAGE_ROTATED_MOTION = "rotated_motion"  # stage 4 (coordinate converter) -> stage 5 (3DGS generator)
+
 
 # Default paths — override with --mdm_repo / --mdm_py if your layout differs
 DEFAULT_MDM_REPO = Path.home() / "motion-diffusion-model"
@@ -73,6 +103,8 @@ class StageBenchmark:
         error: Optional[str] = None,
         output_path: Optional[str] = None,
         log_file: Optional[str] = None,
+        phases: Optional[dict] = None,     # {'read': s, 'compute': s, 'write': s} or None
+        resource: Optional[dict] = None,   # ResourceSampler.summary() or None
     ) -> dict:
         elapsed = round(time.perf_counter() - self._t0, 3) if self._t0 is not None else None
         record = {
@@ -84,6 +116,8 @@ class StageBenchmark:
             'output_path':      output_path,
             'log_file':         log_file,
             'end_iso':          datetime.now().isoformat(),
+            'phases':           phases,
+            'resource':         resource,
         }
         self.stages.append(record)
         self._t0 = None
@@ -103,12 +137,36 @@ class StageBenchmark:
             json.dump(summary, f, indent=2)
 
         csv_path = run_dir / 'benchmark_timing.csv'
-        fields = ['stage', 'name', 'duration_seconds', 'status', 'error',
-                  'output_path', 'log_file', 'end_iso']
+        fields = [
+            'stage', 'name', 'duration_seconds', 'status', 'error', 'output_path', 'log_file', 'end_iso',
+            'phase_read_s', 'phase_compute_s', 'phase_write_s',
+            'res_cpu_pct_avg', 'res_cpu_pct_max', 'res_rss_mb_max', 'res_mem_pct_avg',
+            'res_io_read_mb', 'res_io_write_mb',
+            'res_gpu_util_pct_avg', 'res_gpu_util_pct_max', 'res_gpu_mem_mb_max',
+        ]
+        rows = []
+        for s in self.stages:
+            row = dict(s)
+            phases = row.pop('phases', None) or {}
+            resource = row.pop('resource', None) or {}
+            row['phase_read_s'] = phases.get('read')
+            row['phase_compute_s'] = phases.get('compute')
+            row['phase_write_s'] = phases.get('write')
+            row['res_cpu_pct_avg'] = resource.get('cpu_pct_avg')
+            row['res_cpu_pct_max'] = resource.get('cpu_pct_max')
+            row['res_rss_mb_max'] = resource.get('rss_mb_max')
+            row['res_mem_pct_avg'] = resource.get('mem_pct_avg')
+            row['res_io_read_mb'] = resource.get('io_read_mb')
+            row['res_io_write_mb'] = resource.get('io_write_mb')
+            row['res_gpu_util_pct_avg'] = resource.get('gpu_util_pct_avg')
+            row['res_gpu_util_pct_max'] = resource.get('gpu_util_pct_max')
+            row['res_gpu_mem_mb_max'] = resource.get('gpu_mem_mb_max')
+            rows.append(row)
+
         with open(csv_path, 'w', newline='') as f:
             w = _csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
             w.writeheader()
-            w.writerows(self.stages)
+            w.writerows(rows)
 
         return json_path, csv_path
 
@@ -155,8 +213,13 @@ def run_command(
     log_file: Optional[Path] = None,
     cwd: Optional[Path] = None,
     dry_run: bool = False,
+    sampler: Optional[ResourceSampler] = None,
 ) -> bool:
-    """Execute a command and log output."""
+    """Execute a command and log output. If `sampler` is given, it's start()ed
+    against the child's pid right after launch and stop()ed once it exits, so
+    CPU/mem/disk/GPU usage gets attributed to this specific stage -- this is
+    why the command runs via Popen+wait() rather than a single blocking
+    subprocess.run() call."""
     print(f"\n{'='*80}")
     print(f"Step: {description}")
     print(f"Command: {' '.join(str(c) for c in cmd)}")
@@ -165,33 +228,42 @@ def run_command(
     if log_file:
         print(f"Log: {log_file}")
     print(f"{'='*80}")
-    
+
     if dry_run:
         print("[DRY RUN] Command not executed")
         return True
-    
+
+    log_fh = None
     try:
         if log_file:
             log_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_file, 'w') as f:
-                result = subprocess.run(
-                    cmd,
-                    cwd=cwd,
-                    stdout=f,
-                    stderr=subprocess.STDOUT,
-                    check=True,
-                )
+            log_fh = open(log_file, 'w')
+            proc = subprocess.Popen(cmd, cwd=cwd, stdout=log_fh, stderr=subprocess.STDOUT)
         else:
-            result = subprocess.run(cmd, cwd=cwd, check=True)
-        
+            proc = subprocess.Popen(cmd, cwd=cwd)
+
+        if sampler is not None:
+            sampler.start(proc.pid)
+
+        returncode = proc.wait()
+
+        if sampler is not None:
+            sampler.stop()
+
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd)
+
         print(f"✓ Command succeeded")
         return True
-    
+
     except subprocess.CalledProcessError as e:
         print(f"❌ Command failed with exit code {e.returncode}")
         if log_file and log_file.exists():
             print(f"See log file: {log_file}")
         return False
+    finally:
+        if log_fh is not None:
+            log_fh.close()
 
 
 def find_file(root: Path, filename: str) -> Optional[Path]:
@@ -507,10 +579,30 @@ Examples:
         action="store_true",
         help="Print commands without executing them",
     )
+    parser.add_argument(
+        "--save-intermediate",
+        action="store_true",
+        dest="save_intermediate",
+        help="Also write stage 4's (coordinate converter) sub-step outputs (hugs_smpl_original.npz, "
+             "hugs_smpl_upright.npz) to their conventional on-disk paths, in addition to the default "
+             "pipeline-bus transport. Needed for workflows that re-point HUGS at a saved rotated_npz "
+             "from a past run (e.g. a subsample-k sweep) without re-running MDM/coordinate conversion.",
+    )
     
     args = parser.parse_args()
 
-    # ── Speech input: record + transcribe → use as prompt ─────────────────────
+    start_time = datetime.now()
+    executed_commands = []
+    bench = StageBenchmark()
+
+    # ====================
+    # Stage 1: Speech-to-text -- Whisper transcribes an audio file / mic /
+    # browser recording to raw text. Not run (skipped) for plain --prompt
+    # text input.
+    # ====================
+    bench.start(1, "Speech to text")
+    print(f"\n[1/5] Speech-to-text...")
+    stt_source = None
     if args.audio_file:
         if not _SPEECH_AVAILABLE:
             print("❌ --audio-file requires openai-whisper.")
@@ -525,6 +617,7 @@ Examples:
         if not args.prompt:
             print("❌ Whisper returned empty transcription. Please try again.")
             sys.exit(1)
+        stt_source = f"file:{audio_path.name}"
     elif args.browser_input:
         if not _SPEECH_AVAILABLE:
             print("❌ --browser-input requires openai-whisper.")
@@ -537,6 +630,7 @@ Examples:
         if not args.prompt:
             print("❌ Whisper returned empty transcription. Please try again.")
             sys.exit(1)
+        stt_source = "browser"
     elif args.speech_input:
         if not _SPEECH_AVAILABLE:
             print("❌ --speech-input requires openai-whisper and sounddevice.")
@@ -550,18 +644,39 @@ Examples:
         if not args.prompt:
             print("❌ Whisper returned empty transcription. Please try again.")
             sys.exit(1)
+        stt_source = "mic"
     elif args.prompt is None:
         print("❌ Either --prompt TEXT or --speech-input is required.")
         parser.print_usage()
         sys.exit(1)
 
-    # ── Always normalize prompt to 'a person ...' format ─────────────────────
+    if stt_source:
+        print(f"✓ Transcribed ({stt_source}): {args.prompt!r}")
+    else:
+        print("– Skipped (--prompt given directly, no audio input)")
+    bench.end(
+        status='success' if stt_source else 'skipped',
+        error=None if stt_source else 'no audio input (--prompt given directly)',
+        output_path=stt_source,
+    )
+
+    # ====================
+    # Stage 2: LLM input generator -- llama3.2 (via Ollama, see speech_io.py)
+    # normalizes whatever text stage 1 (or --prompt) produced into the
+    # canonical "a person <motion description>" form MDM expects, plus
+    # optional --refine-prompt extra cleanup on top.
+    # ====================
+    bench.start(2, "LLM input generator")
+    print(f"\n[2/5] LLM input generator...")
     if _SPEECH_AVAILABLE:
         args.prompt = normalize_prompt(args.prompt, model=args.ollama_model)
-
-    # ── Optional LLM prompt refinement (extra cleanup for speech input) ───────
-    if args.refine_prompt:
-        args.prompt = refine_prompt(args.prompt, model=args.ollama_model)
+        if args.refine_prompt:
+            args.prompt = refine_prompt(args.prompt, model=args.ollama_model)
+        print(f"✓ Normalized prompt: {args.prompt!r}")
+        bench.end(status='success', output_path=args.prompt)
+    else:
+        print("– Skipped (speech_io not importable, prompt used as-is)")
+        bench.end(status='skipped', error='speech_io not importable (normalize_prompt unavailable)')
 
     def _speak(text: str, out_wav: Optional[str] = None) -> None:
         """Speak text if --speech-output is enabled."""
@@ -590,11 +705,17 @@ Examples:
         if not args.hugs_py.exists():
             print(f"❌ HUGS Python not found: {args.hugs_py}")
             sys.exit(1)
-    
+        if not pipeline_bus.is_broker_alive(host=args.stream_host, port=args.stream_port):
+            print(f"❌ Pipeline bus/broker not reachable at {args.stream_host}:{args.stream_port}")
+            print("   Stages 3-5 hand off data through it by default (no --save-intermediate).")
+            print("   Start it first:  ./scripts/start_streaming.sh")
+            sys.exit(1)
+
     # Create run directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     slug = slugify(args.prompt)
-    run_dir = args.out_root / f"{timestamp}_{slug}"
+    run_id = f"{timestamp}_{slug}"  # also the pipeline-bus key for this run's stage hand-offs
+    run_dir = args.out_root / run_id
     
     # Create subdirectories
     mdm_out_dir = run_dir / "mdm_out"
@@ -607,7 +728,7 @@ Examples:
         d.mkdir(parents=True, exist_ok=True)
     
     print(f"\n{'='*80}")
-    print("TEXT → MDM → HUGS Pipeline")
+    print("Speech/Text → MDM → HUGS Pipeline")
     print(f"{'='*80}")
     print(f"Prompt:     {args.prompt}")
     _speak(f"{args.prompt}")
@@ -620,25 +741,22 @@ Examples:
     print(f"Bg color:   {args.bg_color}")
     print(f"Dry run:    {args.dry_run}")
     print(f"{'='*80}\n")
-    
-    start_time = datetime.now()
-    executed_commands = []
-    bench = StageBenchmark()
 
     if args.stream_live and not args.dry_run:
         # Tell the stream server we're starting now, well before HUGS
-        # rendering (stage 4) actually connects with real frames — so
+        # rendering (stage 5) actually connects with real frames — so
         # viewers see a "please wait, rendering..." placeholder for the
-        # ~MDM + SMPL-extraction time too, instead of the previous run's
-        # stale replay loop or nothing.
+        # ~motion-generation + coordinate-conversion time too, instead of the
+        # previous run's stale replay loop or nothing.
         from hugs.utils.gst_stream import notify_pending
         notify_pending(host=args.stream_host, port=args.stream_port)
 
     # ====================
-    # Stage 1: Run MDM
+    # Stage 3: Motion generator -- MDM turns the text prompt into a 3D joint
+    # trajectory (skeleton) via motion diffusion, Y-up.
     # ====================
-    bench.start(1, "Run MDM motion generation")
-    print(f"\n[1/5] Running MDM motion generation...")
+    bench.start(3, "Motion generator")
+    print(f"\n[3/5] Motion generator (MDM)...")
     mdm_cmd = build_mdm_cmd(
         prompt=args.prompt,
         out_dir=mdm_out_dir,
@@ -649,14 +767,16 @@ Examples:
     )
     
     mdm_log = mdm_out_dir / "mdm.log"
+    mdm_sampler = ResourceSampler()
     if not run_command(
         mdm_cmd,
         "Generate motion with MDM",
         log_file=mdm_log,
         cwd=args.mdm_repo,
         dry_run=args.dry_run,
+        sampler=mdm_sampler,
     ):
-        bench.end(status='failed', log_file=str(mdm_log))
+        bench.end(status='failed', log_file=str(mdm_log), resource=mdm_sampler.summary())
         print("❌ MDM generation failed")
         sys.exit(1)
 
@@ -669,16 +789,32 @@ Examples:
         status='skipped' if args.dry_run else 'success',
         output_path=str(mdm_out_dir),
         log_file=str(mdm_log),
+        resource=mdm_sampler.summary(),
     )
 
     # ====================
-    # Stage 2: results.npy → hugs_smpl_original.npz via extract_smpl_params.py
+    # Stage 4: Coordinate converter -- MDM's output is a Y-up 3D joint
+    # trajectory, not the SMPL pose parameters + Z-up frame HUGS needs. Two
+    # sub-steps, both via the pipeline bus by default (--save-intermediate
+    # also archives each sub-step's npz to disk):
+    #   a) SMPLify-3D fits SMPL pose params (global_orient/body_pose/betas)
+    #      to MDM's joint trajectory (extract_smpl_params.py)
+    #   b) rotate+translate the fitted root by RX=+90°, RZ=+180° into HUGS's
+    #      coordinate system (rotate_hugs_motion_v2.py)
+    # Both sub-steps' phase/resource stats are combined into this one stage's
+    # bench entry via merge_phase_dicts/merge_resource_summaries.
     # ====================
-    bench.start(2, "Extract SMPL parameters from MDM output")
-    print(f"\n[2/5] Extracting SMPL parameters from MDM output...")
+    bench.start(4, "Coordinate converter")
+    print(f"\n[4/5] Coordinate converter (SMPL fit + rotate)...")
 
     target_npz = smpl_npz_dir / "hugs_smpl_original.npz"
     extract_log = mdm_out_dir / "extract_smpl.log"
+    extract_phases_path = mdm_out_dir / "extract_smpl.phases.json"
+    rotated_npz = rotated_npz_dir / "hugs_smpl_upright.npz"
+    rotate_log = rotated_npz_dir / "rotate.log"
+    rotate_phases_path = rotated_npz_dir / "rotate.phases.json"
+    extract_sampler = ResourceSampler()
+    rotate_sampler = ResourceSampler()
 
     if not args.dry_run:
         # Locate the latest MDM samples directory
@@ -711,25 +847,44 @@ Examples:
 
         print(f"✓ Found MDM results: {results_npy}")
 
-        # Run extract_smpl_params.py (MDM env, MDM cwd) to produce hugs_smpl_original.npz
-        # Use absolute path for --output so it is not resolved relative to mdm_repo cwd
+        # results.npy itself always exists on disk (MDM's own vendored save
+        # convention -- not something we can avoid without forking MDM), but
+        # this stage no longer reads that path directly by default: hand it
+        # off via the pipeline bus instead, same as every later hop.
+        pipeline_bus.push_file(run_id, BUS_STAGE_MDM_RESULTS, results_npy,
+                                host=args.stream_host, port=args.stream_port)
+
+        # -- a) SMPLify-3D fit: results.npy → hugs_smpl_original.npz --------
         extract_script = args.mdm_repo / "sample" / "extract_smpl_params.py"
         extract_cmd = [
             str(args.mdm_py),
             str(extract_script),
-            "--motion_data", str(results_npy),
-            "--output", str(target_npz.resolve()),
+            "--bus-pull", BUS_STAGE_MDM_RESULTS,
+            "--bus-push", BUS_STAGE_SMPL_EXTRACT,
+            "--bus-run-id", run_id,
+            "--bus-host", args.stream_host,
+            "--bus-port", str(args.stream_port),
+            "--pipeline-bus-path", str(args.hugs_repo / "scripts"),
+            "--phase-timing-out", str(extract_phases_path),
         ]
+        if args.save_intermediate:
+            # Use absolute path so it is not resolved relative to mdm_repo cwd
+            extract_cmd.extend(["--output", str(target_npz.resolve())])
 
         if not run_command(
             extract_cmd,
-            "Extract SMPL params (results.npy → hugs_smpl_original.npz)",
+            "Coordinate converter, step a: SMPLify-3D fit (results.npy → hugs_smpl_original.npz, via pipeline bus)",
             log_file=extract_log,
             cwd=args.mdm_repo,   # must run from MDM root for relative model paths
             dry_run=args.dry_run,
+            sampler=extract_sampler,
         ):
-            bench.end(status='failed', log_file=str(extract_log))
-            print("❌ SMPL extraction failed")
+            bench.end(
+                status='failed', log_file=str(extract_log),
+                phases=PhaseTimer.load(extract_phases_path),
+                resource=extract_sampler.summary(),
+            )
+            print("❌ SMPL fit failed")
             print(f"See log: {extract_log}")
             sys.exit(1)
 
@@ -739,81 +894,97 @@ Examples:
             "cwd": str(args.mdm_repo),
         })
 
-        if not target_npz.exists():
+        if args.save_intermediate and not target_npz.exists():
             raise FileNotFoundError(
                 f"hugs_smpl_original.npz not produced by extract_smpl_params.py\n"
                 f"Expected: {target_npz}\n"
                 f"Check log: {extract_log}"
             )
 
-        print(f"✓ SMPL npz ready: {target_npz}")
-        bench.end(status='success', output_path=str(target_npz), log_file=str(extract_log))
+        print(f"✓ SMPL params extracted (bus stage: {BUS_STAGE_SMPL_EXTRACT})"
+              + (f", archived to: {target_npz}" if args.save_intermediate else ""))
+
+        # -- b) rotate+translate into HUGS coordinates -----------------------
+        rotate_script = args.hugs_repo / "scripts/rotate_hugs_motion_v2.py"
+        rotate_cmd = [
+            str(args.hugs_py),
+            str(rotate_script),
+            "--bus-pull", BUS_STAGE_SMPL_EXTRACT,
+            "--bus-push", BUS_STAGE_ROTATED_MOTION,
+            "--bus-run-id", run_id,
+            "--bus-host", args.stream_host,
+            "--bus-port", str(args.stream_port),
+            "--phase-timing-out", str(rotate_phases_path),
+            "--rx", "90",
+            "--rz", "180",
+        ]
+        if args.save_intermediate:
+            rotate_cmd.extend(["--output", str(rotated_npz)])
+
+        if args.center:
+            rotate_cmd.append("--center")
+
+        rotate_cmd.extend(["--tx", str(args.tx)])
+        rotate_cmd.extend(["--ty", str(args.ty)])
+        rotate_cmd.extend(["--tz", str(args.tz)])
+
+        if args.ground is not None:
+            rotate_cmd.extend(["--ground", str(args.ground)])
+
+        if not run_command(
+            rotate_cmd,
+            "Coordinate converter, step b: rotate to HUGS coords (RX=+90°, RZ=+180°, via pipeline bus)",
+            log_file=rotate_log,
+            cwd=args.hugs_repo,
+            dry_run=args.dry_run,
+            sampler=rotate_sampler,
+        ):
+            bench.end(
+                status='failed', log_file=str(rotate_log),
+                phases=merge_phase_dicts([PhaseTimer.load(extract_phases_path), PhaseTimer.load(rotate_phases_path)]),
+                resource=merge_resource_summaries([extract_sampler.summary(), rotate_sampler.summary()]),
+            )
+            print("❌ Rotation failed")
+            sys.exit(1)
+
+        executed_commands.append({
+            "stage": "rotate",
+            "cmd": " ".join(str(c) for c in rotate_cmd),
+            "cwd": str(args.hugs_repo),
+        })
+        print(f"✓ Rotated to HUGS coordinates (bus stage: {BUS_STAGE_ROTATED_MOTION})"
+              + (f", archived to: {rotated_npz}" if args.save_intermediate else ""))
+
+        bench.end(
+            status='success',
+            output_path=str(rotated_npz) if args.save_intermediate else None,
+            log_file=f"{extract_log}, {rotate_log}",
+            phases=merge_phase_dicts([PhaseTimer.load(extract_phases_path), PhaseTimer.load(rotate_phases_path)]),
+            resource=merge_resource_summaries([extract_sampler.summary(), rotate_sampler.summary()]),
+        )
 
     else:
-        print(f"[DRY RUN] Would run extract_smpl_params.py on MDM results.npy")
-        print(f"[DRY RUN] Target: {target_npz}")
+        print(f"[DRY RUN] Would run extract_smpl_params.py + rotate_hugs_motion_v2.py (via pipeline bus)")
+        if args.save_intermediate:
+            print(f"[DRY RUN] Would also archive to: {target_npz}, {rotated_npz}")
         bench.end(status='skipped')
-    
-    # ====================
-    # Stage 3: Rotate to HUGS coordinates
-    # ====================
-    bench.start(3, "Rotate SMPL motion to HUGS coordinates")
-    print(f"\n[3/5] Rotating SMPL motion to HUGS coordinates...")
-    
-    rotate_script = args.hugs_repo / "scripts/rotate_hugs_motion_v2.py"
-    rotated_npz = rotated_npz_dir / "hugs_smpl_upright.npz"
-    
-    rotate_cmd = [
-        str(args.hugs_py),
-        str(rotate_script),
-        "--input", str(target_npz),
-        "--output", str(rotated_npz),
-        "--rx", "90",
-        "--rz", "180",
-    ]
-
-    if args.center:
-        rotate_cmd.append("--center")
-
-    rotate_cmd.extend(["--tx", str(args.tx)])
-    rotate_cmd.extend(["--ty", str(args.ty)])
-    rotate_cmd.extend(["--tz", str(args.tz)])
-
-    if args.ground is not None:
-        rotate_cmd.extend(["--ground", str(args.ground)])
-    
-    rotate_log = rotated_npz_dir / "rotate.log"
-    if not run_command(
-        rotate_cmd,
-        "Rotate SMPL motion (MDM → HUGS coords: RX=+90°, RZ=+180°)",
-        log_file=rotate_log,
-        cwd=args.hugs_repo,
-        dry_run=args.dry_run,
-    ):
-        bench.end(status='failed', log_file=str(rotate_log))
-        print("❌ Rotation failed")
-        sys.exit(1)
-
-    executed_commands.append({
-        "stage": "rotate",
-        "cmd": " ".join(str(c) for c in rotate_cmd),
-        "cwd": str(args.hugs_repo),
-    })
-    bench.end(
-        status='skipped' if args.dry_run else 'success',
-        output_path=str(rotated_npz),
-        log_file=str(rotate_log),
-    )
 
     # ====================
-    # Stage 4: Run HUGS rendering
+    # Stage 5: 3DGS generator -- HUGS renders the (Z-up, SMPL-parameterized)
+    # motion into per-frame Gaussian Splats, producing PNG frames + the final
+    # MP4 (PLY export is opt-in via --save_ply, off by default). Frames
+    # stream live via GStreamer as they render when --stream-live is set
+    # (hugs/utils/gst_stream.py) -- there's no separate playback/render-
+    # serving stage, since that streaming already happens inline here rather
+    # than as a later step over the finished file.
     # ====================
-    bench.start(4, "Run HUGS rendering")
-    print(f"\n[4/5] Running HUGS rendering...")
-    
+    bench.start(5, "3DGS generator")
+    print(f"\n[5/5] 3DGS generator (HUGS render)...")
+
     scene_cfg = SCENE_CONFIGS[args.scene]
 
     hugs_config = args.hugs_repo / "cfg_files/release/neuman/hugs_human_scene.yaml"
+    hugs_phases_path = hugs_logs_dir / "hugs_phases.json"
     hugs_cmd = [
         str(args.hugs_py),
         "main.py",
@@ -823,28 +994,40 @@ Examples:
         "mode=human",
         f"bg_color={args.bg_color}",
         f"human.ckpt={scene_cfg['human_ckpt']}",
-        f"custom_motion_path={rotated_npz}",
         f"save_anim_ply={'true' if args.save_ply else 'false'}",
         f"anim_subsample_k={args.subsample_k}",
         f"stream_live={'true' if args.stream_live else 'false'}",
         f"stream_host={args.stream_host}",
         f"stream_port={args.stream_port}",
         f"stream_segment_duration={args.stream_segment_duration}",
+        f"phase_timing_out={hugs_phases_path}",
+        # run_text2hugs.py never uses the canonical a_pose/da_pose preview
+        # (final/ only gets anim_*.mp4 + anim_ply/) -- skip rendering it.
+        "skip_canonical=true",
     ]
+    if args.save_intermediate:
+        hugs_cmd.append(f"custom_motion_path={rotated_npz}")
+    else:
+        # Default: HUGS pulls the rotated motion from the pipeline bus itself
+        # (hugs/datasets/neuman.py) instead of reading a file path.
+        hugs_cmd.append(f"custom_motion_bus_stage={BUS_STAGE_ROTATED_MOTION}")
+        hugs_cmd.append(f"custom_motion_bus_run_id={run_id}")
 
     hugs_log = hugs_logs_dir / "hugs.log"
-    
+
     # Record timestamp before HUGS run to find new mp4 files
     before_hugs = datetime.now().timestamp()
-    
+
+    hugs_sampler = ResourceSampler()
     if not run_command(
         hugs_cmd,
         f"Render HUGS animation (scene={args.scene})",
         log_file=hugs_log,
         cwd=args.hugs_repo,
         dry_run=args.dry_run,
+        sampler=hugs_sampler,
     ):
-        bench.end(status='failed', log_file=str(hugs_log))
+        bench.end(status='failed', log_file=str(hugs_log), resource=hugs_sampler.summary())
         print("❌ HUGS rendering failed")
         sys.exit(1)
 
@@ -853,18 +1036,10 @@ Examples:
         "cmd": " ".join(str(c) for c in hugs_cmd),
         "cwd": str(args.hugs_repo),
     })
-    bench.end(
-        status='skipped' if args.dry_run else 'success',
-        output_path=str(hugs_logs_dir),
-        log_file=str(hugs_log),
-    )
 
-    # ====================
-    # Stage 5: Extract final video
-    # ====================
-    bench.start(5, "Extract final video and PLY frames")
-    print(f"\n[5/5] Extracting final video and PLY frames...")
-    
+    # Collecting the finished mp4/PLY into final/ is bookkeeping on top of
+    # the render above, not a separate stage -- it stays part of this same
+    # bench(5) entry rather than getting its own stage number.
     if not args.dry_run:
         hugs_output_dir = args.hugs_repo / "output"
         newest_mp4 = find_newest_mp4(hugs_output_dir, after_time=before_hugs)
@@ -909,6 +1084,9 @@ Examples:
     bench.end(
         status='skipped' if args.dry_run else 'success',
         output_path=str(final_dir),
+        log_file=str(hugs_log),
+        phases=PhaseTimer.load(hugs_phases_path),
+        resource=hugs_sampler.summary(),
     )
     end_time = datetime.now()
 
@@ -916,7 +1094,7 @@ Examples:
     # Save run record
     # ====================
     record_data = {
-        "pipeline_version": "1.0",
+        "pipeline_version": "2.0",  # 2.0: 5-stage breakdown (STT / LLM / MDM / coordinate-convert / 3DGS-gen) + pipeline-bus transport + phase/resource profiling
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
         "duration_seconds": (end_time - start_time).total_seconds(),
@@ -980,18 +1158,29 @@ Examples:
     print(f"Posed PLYs:     {final_ply_dir if 'final_ply_dir' in locals() and final_ply_dir else 'N/A'}")
     print(f"Run record:     {record_path}")
 
-    print(f"\n{'─'*80}")
-    print("  Benchmark Timing")
-    print(f"{'─'*80}")
-    print(f"  {'#':<4} {'Stage':<42} {'Duration':>10}  {'Status'}")
-    print(f"  {'─'*4} {'─'*42} {'─'*10}  {'─'*8}")
+    NAME_W = 22
+    print(f"\n{'─'*90}")
+    print("  Benchmark Timing  (CPU/RSS/GPU are averages sampled during each stage's subprocess)")
+    print(f"{'─'*90}")
+    header = f"  {'#':<4} {'Stage':<{NAME_W}} {'Duration':>9}  {'CPU%':>6} {'RSS(MB)':>8} {'GPU%':>6} {'VRAM(MB)':>9}  {'Status'}"
+    print(header)
+    print(f"  {'─'*4} {'─'*NAME_W} {'─'*9}  {'─'*6} {'─'*8} {'─'*6} {'─'*9}  {'─'*8}")
     for s in bench.stages:
         dur = f"{s['duration_seconds']:.1f}s" if s['duration_seconds'] is not None else '—'
         status_icon = {'success': '✓', 'failed': '✗', 'skipped': '–'}.get(s['status'], s['status'])
-        print(f"  {s['stage']:<4} {s['name']:<42} {dur:>10}  {status_icon} {s['status']}")
-    print(f"  {'─'*4} {'─'*42} {'─'*10}  {'─'*8}")
-    print(f"  {'':4} {'TOTAL':<42} {bench.total_seconds():.1f}s")
-    print(f"{'─'*80}")
+        res = s.get('resource') or {}
+        cpu = f"{res['cpu_pct_avg']:.0f}" if res.get('cpu_pct_avg') is not None else '—'
+        rss = f"{res['rss_mb_max']:.0f}" if res.get('rss_mb_max') is not None else '—'
+        gpu = f"{res['gpu_util_pct_avg']:.0f}" if res.get('gpu_util_pct_avg') is not None else '—'
+        vram = f"{res['gpu_mem_mb_max']:.0f}" if res.get('gpu_mem_mb_max') is not None else '—'
+        print(f"  {s['stage']:<4} {s['name']:<{NAME_W}} {dur:>9}  {cpu:>6} {rss:>8} {gpu:>6} {vram:>9}  {status_icon} {s['status']}")
+        phases = s.get('phases') or {}
+        if phases:
+            phase_str = "  ".join(f"{name}: {secs:.2f}s" for name, secs in phases.items())
+            print(f"  {'':4} {'  ' + phase_str}")
+    print(f"  {'─'*4} {'─'*NAME_W} {'─'*9}  {'─'*6} {'─'*8} {'─'*6} {'─'*9}  {'─'*8}")
+    print(f"  {'':4} {'TOTAL':<{NAME_W}} {bench.total_seconds():.1f}s")
+    print(f"{'─'*90}")
     print(f"  Benchmark CSV:  {bench_csv}")
     print(f"{'='*80}\n")
 

@@ -6,6 +6,7 @@
 import os
 import glob
 import shutil
+import contextlib
 import torch
 import itertools
 import torchvision
@@ -568,63 +569,90 @@ class GaussianTrainer():
         streamer = None
         total_stream_frames = len(range(0, len(self.anim_dataset), k))
         pushed_frames = 0
-        for idx, data in enumerate(tqdm(self.anim_dataset, desc="Animation")):
-            if idx % k != 0:
-                continue
+
+        # Per-frame read/compute/write phase timing (see
+        # scripts/pipeline_profiling.py), only when the orchestrator asked
+        # for it via cfg.phase_timing_out (run_text2hugs.py's --phase-timing-out
+        # plumbing). Durations accumulate across all frames since PhaseTimer
+        # sums repeated calls to the same phase name.
+        phase_timing_out = getattr(self.cfg, 'phase_timing_out', '')
+        phases = None
+        if phase_timing_out:
+            import sys
+            from pathlib import Path as _Path
+            scripts_dir = str(_Path(__file__).resolve().parents[2] / 'scripts')
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            from pipeline_profiling import PhaseTimer
+            phases = PhaseTimer()
+
+        # Iterate by explicit index (rather than `for data in self.anim_dataset`)
+        # so subsampled-out frames (idx % k != 0) are never fetched at all, and
+        # so the fetch itself (self.anim_dataset[idx]) can be timed as its own
+        # 'read' phase below.
+        for idx in tqdm(range(0, len(self.anim_dataset), k), desc="Animation"):
+            with (phases.phase('read') if phases else contextlib.nullcontext()):
+                data = self.anim_dataset[idx]
+
             human_gs_out, scene_gs_out = None, None
-            
-            if self.human_gs:
-                ext_tfs = (data['manual_trans'], data['manual_rotmat'], data['manual_scale'])
-                human_gs_out = self.human_gs.forward(
-                    global_orient=data['global_orient'],
-                    body_pose=data['body_pose'],
-                    betas=data['betas'],
-                    transl=data['transl'],
-                    smpl_scale=data['smpl_scale'][None],
-                    dataset_idx=-1,
-                    is_train=False,
-                    ext_tfs=ext_tfs,
+
+            with (phases.phase('compute') if phases else contextlib.nullcontext()):
+                if self.human_gs:
+                    ext_tfs = (data['manual_trans'], data['manual_rotmat'], data['manual_scale'])
+                    human_gs_out = self.human_gs.forward(
+                        global_orient=data['global_orient'],
+                        body_pose=data['body_pose'],
+                        betas=data['betas'],
+                        transl=data['transl'],
+                        smpl_scale=data['smpl_scale'][None],
+                        dataset_idx=-1,
+                        is_train=False,
+                        ext_tfs=ext_tfs,
+                    )
+
+                if self.scene_gs:
+                    scene_gs_out = self.scene_gs.forward()
+
+                render_pkg = render_human_scene(
+                    data=data,
+                    human_gs_out=human_gs_out,
+                    scene_gs_out=scene_gs_out,
+                    bg_color=self.bg_color,
+                    render_mode=self.cfg.mode,
                 )
-            
-            if self.scene_gs:
-                scene_gs_out = self.scene_gs.forward()
-                    
-            render_pkg = render_human_scene(
-                data=data, 
-                human_gs_out=human_gs_out, 
-                scene_gs_out=scene_gs_out, 
-                bg_color=self.bg_color,
-                render_mode=self.cfg.mode,
-            )
-            
-            image = render_pkg["render"]
 
-            if getattr(self.cfg, 'stream_live', False) and streamer is None:
-                from hugs.utils.gst_stream import FrameStreamClient
-                stream_out_dir = f'{self.cfg.logdir}/stream'
-                streamer = FrameStreamClient(
-                    image,
-                    fps=anim_fps,
-                    out_dir=stream_out_dir,
-                    segment_duration=getattr(self.cfg, 'stream_segment_duration', 1.0),
-                    host=getattr(self.cfg, 'stream_host', '127.0.0.1'),
-                    port=getattr(self.cfg, 'stream_port', 9977),
-                    total_frames=total_stream_frames,
-                )
-                logger.info(f"Live streaming (HLS) to {stream_out_dir}")
+                image = render_pkg["render"]
 
-            if streamer is not None:
-                pushed_frames += 1
-                streamer.push_frame(image)
+            with (phases.phase('write') if phases else contextlib.nullcontext()):
+                if getattr(self.cfg, 'stream_live', False) and streamer is None:
+                    from hugs.utils.gst_stream import FrameStreamClient
+                    stream_out_dir = f'{self.cfg.logdir}/stream'
+                    streamer = FrameStreamClient(
+                        image,
+                        fps=anim_fps,
+                        out_dir=stream_out_dir,
+                        segment_duration=getattr(self.cfg, 'stream_segment_duration', 1.0),
+                        host=getattr(self.cfg, 'stream_host', '127.0.0.1'),
+                        port=getattr(self.cfg, 'stream_port', 9977),
+                        total_frames=total_stream_frames,
+                    )
+                    logger.info(f"Live streaming (HLS) to {stream_out_dir}")
 
-            torchvision.utils.save_image(image, f'{self.cfg.logdir}/anim/{idx:05d}.png')
+                if streamer is not None:
+                    pushed_frames += 1
+                    streamer.push_frame(image)
 
-            if self.cfg.save_anim_ply and human_gs_out is not None:
-                os.makedirs(f'{self.cfg.logdir}/anim_ply/', exist_ok=True)
-                save_posed_ply(human_gs_out, f'{self.cfg.logdir}/anim_ply/{idx:05d}_splat.ply')
+                torchvision.utils.save_image(image, f'{self.cfg.logdir}/anim/{idx:05d}.png')
+
+                if self.cfg.save_anim_ply and human_gs_out is not None:
+                    os.makedirs(f'{self.cfg.logdir}/anim_ply/', exist_ok=True)
+                    save_posed_ply(human_gs_out, f'{self.cfg.logdir}/anim_ply/{idx:05d}_splat.ply')
 
         if streamer is not None:
             streamer.close()
+
+        if phases:
+            phases.save(phase_timing_out)
 
         video_fname = f'{self.cfg.logdir}/anim_{self.cfg.dataset.name}_{self.cfg.dataset.seq}_{iter_s}.mp4'
         create_video(f'{self.cfg.logdir}/anim/', video_fname, fps=anim_fps)

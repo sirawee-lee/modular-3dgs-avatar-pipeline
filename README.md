@@ -316,7 +316,7 @@ python scripts/run_text2hugs.py \
 
 ```bash
 ./scripts/start_streaming.sh   # once, starts the background servers
-# open http://127.0.0.1:8889/hugs_stream and leave the tab open
+# open http://127.0.0.1:9080/hugs_stream and leave the tab open
 
 python scripts/run_text2hugs.py \
   --prompt "a person jumps" \

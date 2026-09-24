@@ -22,12 +22,24 @@ cfg.eval = False
 cfg.bg_color = 'white'
 cfg.save_anim_ply = True  # save per-frame posed .ply files during animation (deformed/animated position)
 cfg.anim_subsample_k = 1  # export every k-th frame (1=all, 2=half, 4=quarter)
+cfg.skip_canonical = False  # skip the 200-frame a_pose/da_pose canonical preview render after animate() (main.py) -- it's unused by run_text2hugs.py
 
 # live streaming (see hugs/utils/gst_stream.py + scripts/gst_stream_server.py)
 cfg.stream_live = False  # push each rendered anim frame to a live GStreamer/HLS server as it's rendered
 cfg.stream_host = '127.0.0.1'
 cfg.stream_port = 9977
 cfg.stream_segment_duration = 1.0  # seconds per HLS segment
+
+# pipeline bus (see scripts/pipeline_bus.py + scripts/gst_stream_server.py): pull
+# the rotated custom-motion npz from the broker instead of custom_motion_path on
+# disk -- this is how run_text2hugs.py feeds HUGS by default (no --save-intermediate).
+# Reuses stream_host/stream_port above as the bus endpoint (same broker process).
+cfg.custom_motion_bus_stage = ''    # e.g. "rotated_motion"; empty = use custom_motion_path instead
+cfg.custom_motion_bus_run_id = ''
+cfg.bus_pull_timeout = 120.0
+
+# per-stage read/compute/write phase timing (see scripts/pipeline_profiling.py)
+cfg.phase_timing_out = ''  # path to write animate()'s phase_timing JSON to; empty = disabled
 
 # human dataset configuration
 cfg.dataset = OmegaConf.create()
