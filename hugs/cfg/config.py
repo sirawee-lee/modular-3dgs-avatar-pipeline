@@ -24,6 +24,13 @@ cfg.save_anim_ply = True  # save per-frame posed .ply files during animation (de
 cfg.anim_subsample_k = 1  # export every k-th frame (1=all, 2=half, 4=quarter)
 cfg.skip_canonical = False  # skip the 200-frame a_pose/da_pose canonical preview render after animate() (main.py) -- it's unused by run_text2hugs.py
 
+# --orbit-camera (see hugs/datasets/neuman.py::orbiting_caps): circle the
+# camera 360° around the avatar's average position during animate(), instead
+# of the per-scene fixed/sliding camera (rendering_caps) that always faces
+# one direction.
+cfg.orbit_camera = False
+cfg.orbit_dist = 3.0  # distance (world units) from the avatar to the orbiting camera
+
 # live streaming (see hugs/utils/gst_stream.py + scripts/gst_stream_server.py)
 cfg.stream_live = False  # push each rendered anim frame to a live GStreamer/HLS server as it's rendered
 cfg.stream_host = '127.0.0.1'

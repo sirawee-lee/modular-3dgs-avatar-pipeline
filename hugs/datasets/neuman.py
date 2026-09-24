@@ -182,6 +182,56 @@ def rendering_caps(scene_name, nframes, scene):
     return dummy_caps
 
 
+def orbiting_caps(scene, nframes, center, dist=3.0, base_idx=0, angle_limit=2 * np.pi):
+    """Camera path that orbits once around `center` (a 3-vector already in
+    the scene's own world coordinates), instead of rendering_caps()'s small
+    fixed-facing slide/ellipse -- this is what --orbit-camera uses to show
+    the avatar from every angle instead of one fixed direction.
+
+    Reuses one existing capture's intrinsics/resolution (deep-copied); only
+    the camera pose (position AND orientation, not just position like
+    rendering_caps()) changes per frame. Rotates around the base capture's
+    own "up" axis rather than assuming a fixed world axis, since NeuMan
+    scenes don't share one common up-axis convention (see how rendering_caps()
+    above always works relative to a capture's own right/up/forward too).
+    """
+    base = scene.captures[base_idx]
+    center = np.asarray(center, dtype=np.float64).reshape(3)
+
+    base_up = base.cam_pose.up / np.linalg.norm(base.cam_pose.up)
+    base_fwd = base.cam_pose.forward / np.linalg.norm(base.cam_pose.forward)
+    base_right = np.cross(base_up, base_fwd)
+    base_right /= np.linalg.norm(base_right)
+    base_fwd = np.cross(base_right, base_up)  # re-orthogonalize against up
+
+    dummy_caps = []
+    for i in range(nframes):
+        azim = angle_limit * i / max(nframes, 1)
+        offset = dist * (np.cos(azim) * base_fwd + np.sin(azim) * base_right)
+        cam_pos = center + offset
+
+        forward = center - cam_pos
+        forward = forward / np.linalg.norm(forward)
+        right = np.cross(forward, base_up)
+        right = right / np.linalg.norm(right)
+        up = np.cross(right, forward)
+
+        c2w = np.eye(4)
+        c2w[:3, 0] = right
+        c2w[:3, 1] = -up       # CameraPose.up == -camera_to_world[:3, 1]
+        c2w[:3, 2] = forward   # CameraPose.forward == camera_to_world[:3, 2]
+        c2w[:3, 3] = cam_pos
+        # Other captures' matrices are float32 (loaded from disk); building
+        # c2w with np.eye(4) defaults to float64, which later fails a
+        # float32/float64 tensor matmul in get_single_item() -- match dtype.
+        c2w = c2w.astype(np.float32)
+
+        temp = copy.deepcopy(base)
+        temp.cam_pose = CameraPose.from_camera_to_world(c2w, unstable=True)
+        dummy_caps.append(temp)
+    return dummy_caps
+
+
 def _custom_motion_arrays(custom_data):
     """Shared by the disk (custom_motion_path) and pipeline-bus
     (custom_motion_bus_stage) custom-motion loading branches below --
@@ -269,7 +319,20 @@ class NeumanDataset(torch.utils.data.Dataset):
             self.manual_trans = torch.from_numpy(manual_trans).float().unsqueeze(0)
             self.manual_scale = torch.tensor([manual_scale]).float().unsqueeze(0)
             nframes = poses.shape[0]
-            caps = rendering_caps(seq, nframes, scene)
+            if cfg and getattr(cfg, 'orbit_camera', False):
+                # --orbit-camera: circle the avatar instead of the fixed/
+                # sliding per-scene camera. The avatar's world position is
+                # transl (root translation) PLUS the same scene-alignment
+                # transform (manual_trans/rotmat/scale) applied inside
+                # human_gs.forward() -- see hugs/models/hugs_trimlp.py's
+                # `deformed_xyz = tr + sc * (rotmat @ deformed_xyz)` -- so the
+                # orbit center has to go through that same transform, or it
+                # circles the wrong point for scaled/rotated scenes.
+                center_pre_alignment = transl.mean(axis=0).astype(np.float64)
+                orbit_center = manual_trans + manual_scale * (manual_rotmat @ center_pre_alignment)
+                caps = orbiting_caps(scene, nframes, orbit_center, dist=getattr(cfg, 'orbit_dist', 3.0))
+            else:
+                caps = rendering_caps(seq, nframes, scene)
             scene.captures = caps
         else:
             self.train_split, _, self.val_split = get_data_splits(scene)

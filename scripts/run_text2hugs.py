@@ -493,6 +493,21 @@ Examples:
         dest="subsample_k",
         help="Export every k-th frame during animation (1=all frames, 2=half, 4=quarter; default: 1)",
     )
+    parser.add_argument(
+        "--orbit-camera",
+        action="store_true",
+        dest="orbit_camera",
+        help="Circle the camera 360° around the avatar over the course of the clip, instead of the "
+             "default per-scene fixed/sliding camera that always faces one direction.",
+    )
+    parser.add_argument(
+        "--orbit-dist",
+        type=float,
+        default=3.0,
+        dest="orbit_dist",
+        help="Distance (world units) from the avatar to the orbiting camera, only used with "
+             "--orbit-camera (default: 3.0; tuned for --scene bike, may need adjusting for other scenes)",
+    )
 
     # Speech I/O
     parser.add_argument(
@@ -1005,6 +1020,9 @@ Examples:
         # (final/ only gets anim_*.mp4 + anim_ply/) -- skip rendering it.
         "skip_canonical=true",
     ]
+    if args.orbit_camera:
+        hugs_cmd.append("orbit_camera=true")
+        hugs_cmd.append(f"orbit_dist={args.orbit_dist}")
     if args.save_intermediate:
         hugs_cmd.append(f"custom_motion_path={rotated_npz}")
     else:
